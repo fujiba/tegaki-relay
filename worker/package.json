@@ -1,0 +1,16 @@
+{
+  "name": "tegaki-relay-cloudflare-worker",
+  "version": "0.1.0",
+  "main": "worker.js",
+  "scripts": {
+    "test": "vitest",
+    "build": "node build.js"
+  },
+  "author": "fujiba",
+  "license": "MIT",
+  "description": "",
+  "devDependencies": {
+    "miniflare": "^4.20250823.1",
+    "vitest": "^3.2.4"
+  }
+}
