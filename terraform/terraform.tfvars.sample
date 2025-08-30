@@ -1,0 +1,4 @@
+
+cloudflare_account_id=YOUR_ACCOUNT_ID_HERE
+cloudflare_zone_id=YOUR_ZONE_ID_HERE
+domain_name=YOUR_DOMAIN_NAME_HERE
