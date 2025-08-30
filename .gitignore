@@ -1,0 +1,47 @@
+# General
+###################
+# OS-generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Editor/IDE specific settings
+.vscode/
+.idea/
+
+# Environment variables
+# Keep environment variables out of git. Use a .sample file for templates.
+.env
+.env.*
+!.env.example
+
+
+# Terraform
+###################
+# Local state files. Use a remote backend for team collaboration.
+*.tfstate
+*.tfstate.backup
+
+# Sensitive variable files. Use .tfvars.sample instead.
+terraform.tfvars
+*.auto.tfvars
+
+# Terraform runtime files
+.terraform/
+crash.log
+
+
+# Node.js (for Cloudflare Worker in /worker)
+###################
+# Dependencies
+/worker/node_modules/
+
+# Build artifacts and test reports
+/worker/dist/
+/worker/coverage/
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+node_modules
