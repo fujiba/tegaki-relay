@@ -20,6 +20,15 @@ resource "cloudflare_workers_script" "email_forwarder" {
         namespace_id = cloudflare_workers_kv_namespace.forwarding_list.id
     }
   ]
+  observability = {
+    enabled = true
+    head_sampling_rate = 1
+    logs = {
+      enabled = true
+      head_sampling_rate = 1
+      invocation_logs = true
+    }
+  }
 }
 
 # Email Routingのルールを作成
