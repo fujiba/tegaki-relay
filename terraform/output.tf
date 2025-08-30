@@ -1,3 +1,7 @@
+output "account_id" {
+  value = var.cloudflare_account_id
+  description = "The ID of cloudflare account id"
+}
 output "kv_namespace_id" {
   value       = cloudflare_workers_kv_namespace.forwarding_list.id
   description = "The ID of the KV namespace for email forwarding."
