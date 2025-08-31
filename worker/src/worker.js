@@ -30,26 +30,27 @@ export default {
     // The KV key is the recipient address itself
     const forwardingListJson = await env.FORWARDING_LIST_KV.get(recipient)
 
-    if (forwardingListJson) {
-      try {
-        const forwardingAddresses = JSON.parse(forwardingListJson)
-
-        if (Array.isArray(forwardingAddresses) && forwardingAddresses.length > 0) {
-          console.log(`Forwarding ${recipient} to: ${forwardingAddresses.join(', ')}`)
-          await Promise.all(forwardingAddresses.map((address) => message.forward(address)))
-        } else {
-          // If data exists in KV but it's an empty array, etc.
-          console.log(`No valid forwarding addresses found for ${recipient}. Bouncing.`)
-          message.setReject('Address does not exist.')
-        }
-      } catch (e) {
-        console.error(`Error processing forwarding for ${recipient}:`, e)
-        message.setReject('Configuration error.')
-      }
-    } else {
+    if (!forwardingListJson) {
       // If the key does not exist in KV, reject the email
       console.log(`Recipient ${recipient} not found in KV. Bouncing.`)
       message.setReject('Address does not exist at this domain.')
+      return
+    }
+
+    try {
+      const forwardingAddresses = JSON.parse(forwardingListJson)
+
+      if (Array.isArray(forwardingAddresses) && forwardingAddresses.length > 0) {
+        console.log(`Forwarding ${recipient} to: ${forwardingAddresses.join(', ')}`)
+        await Promise.all(forwardingAddresses.map((address) => message.forward(address)))
+      } else {
+        // If data exists in KV but it's an empty array, etc.
+        console.log(`No valid forwarding addresses found for ${recipient}. Bouncing.`)
+        message.setReject('Address does not exist.')
+      }
+    } catch (e) {
+      console.error(`Error processing forwarding for ${recipient}:`, e)
+      message.setReject('Configuration error.')
     }
   }
 }

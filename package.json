@@ -1,6 +1,6 @@
 {
   "name": "tegaki-relay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Manage Cloudflare Email Routing with Google Sheets - Simple email forwarding/relay solution using familiar spreadsheet interface. ",
   "scripts": {},
   "author": "T.Fujiba",

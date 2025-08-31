@@ -56,4 +56,95 @@ describe('Email Forwarder Worker Tests', () => {
     expect(mockMessage.forwardedTo.length).toBe(0) // 誰も転送されていないこと
     expect(mockMessage.rejected).toBeDefined() // ちゃんと拒否されているか
   })
+
+  it('KVの値が無効なJSONの場合にメールを拒否すること', async () => {
+    const kv = await mf.getKVNamespace('FORWARDING_LIST_KV');
+    await kv.put('info@your-domain.com', 'invalid-json');
+
+    const mockMessage = {
+      to: 'info@your-domain.com',
+      forwardedTo: [],
+      async forward(email) {
+        this.forwardedTo.push(email);
+      },
+      setReject(reason) {
+        this.rejected = reason;
+      },
+    };
+
+    const env = await mf.getBindings();
+    await worker.email(mockMessage, env);
+
+    expect(mockMessage.forwardedTo.length).toBe(0);
+    expect(mockMessage.rejected).toBe('Configuration error.');
+  });
+
+  it('KVの値が配列でない場合にメールを拒否すること', async () => {
+    const kv = await mf.getKVNamespace('FORWARDING_LIST_KV');
+    await kv.put('info@your-domain.com', JSON.stringify({ email: 'user@example.net' }));
+
+    const mockMessage = {
+      to: 'info@your-domain.com',
+      forwardedTo: [],
+      async forward(email) {
+        this.forwardedTo.push(email);
+      },
+      setReject(reason) {
+        this.rejected = reason;
+      },
+    };
+
+    const env = await mf.getBindings();
+    await worker.email(mockMessage, env);
+
+    expect(mockMessage.forwardedTo.length).toBe(0);
+    expect(mockMessage.rejected).toBe('Address does not exist.');
+  });
+
+  it('KVの値が空の配列の場合にメールを拒否すること', async () => {
+    const kv = await mf.getKVNamespace('FORWARDING_LIST_KV');
+    await kv.put('info@your-domain.com', JSON.stringify([]));
+
+    const mockMessage = {
+      to: 'info@your-domain.com',
+      forwardedTo: [],
+      async forward(email) {
+        this.forwardedTo.push(email);
+      },
+      setReject(reason) {
+        this.rejected = reason;
+      },
+    };
+
+    const env = await mf.getBindings();
+    await worker.email(mockMessage, env);
+
+    expect(mockMessage.forwardedTo.length).toBe(0);
+    expect(mockMessage.rejected).toBe('Address does not exist.');
+  });
+
+  it('転送に失敗した場合にメールを拒否すること', async () => {
+    const kv = await mf.getKVNamespace('FORWARDING_LIST_KV');
+    const forwardingList = ['valid@example.com', 'invalid-unverified-address@example.com'];
+    await kv.put('info@your-domain.com', JSON.stringify(forwardingList));
+
+    const mockMessage = {
+      to: 'info@your-domain.com',
+      forwardedTo: [],
+      async forward(email) {
+        if (email.includes('invalid')) {
+          throw new Error('Failed to forward');
+        }
+        this.forwardedTo.push(email);
+      },
+      setReject(reason) {
+        this.rejected = reason;
+      },
+    };
+
+    const env = await mf.getBindings();
+    await worker.email(mockMessage, env);
+
+    expect(mockMessage.rejected).toBe('Configuration error.');
+  });
 })
