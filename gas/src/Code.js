@@ -18,6 +18,7 @@ function onOpen() {
     menu.addSeparator()
   }
   menu.addItem('Cloudflareへ同期', 'syncSheetToKV')
+  menu.addItem('Dry Runを実行', 'dryRunSync')
   menu.addToUi()
 }
 
@@ -61,10 +62,10 @@ function initializeSheet() {
     const finalDataSheet = ss.getSheetByName(DATA_SHEET_NAME)
 
     // Set headers and formatting
-    finalSettingsSheet.getRange('A1:A2').setValues([['CF_ACCOUNT_ID'], ['CF_NAMESPACE_ID']])
-    finalSettingsSheet.getRange('A1:B1').setFontWeight('bold')
+    finalSettingsSheet.getRange('A1:A3').setValues([['CF_ACCOUNT_ID'], ['CF_NAMESPACE_ID'], ['DOMAIN_NAME']])
+    finalSettingsSheet.getRange('A1:A3').setFontWeight('bold')
     finalDataSheet
-      .getRange('A1:C1')
+      .getRange('A1:K1')
       .setValues([
         [
           'Group Address',
@@ -80,7 +81,7 @@ function initializeSheet() {
           'Forwarding Address 10'
         ]
       ])
-    finalDataSheet.getRange('A1:K1').setFontWeight('bold')
+      .setFontWeight('bold') // setValuesに続けてスタイルを設定
 
     // Freeze header rows
     finalSettingsSheet.setFrozenRows(1)
@@ -98,42 +99,6 @@ function initializeSheet() {
 }
 
 /**
- * Fetches all keys from Cloudflare KV.
- * @private
- */
-function listCloudflareKVKeys_(config) {
-  const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/keys?limit=1000`
-  const options = {
-    method: 'get',
-    headers: { Authorization: `Bearer ${config.apiToken}` },
-    muteHttpExceptions: true
-  }
-  const response = UrlFetchApp.fetch(apiUrl, options)
-  if (response.getResponseCode() !== 200) {
-    throw new Error(`Failed to fetch KV keys: ${response.getContentText()}`)
-  }
-  const data = JSON.parse(response.getContentText())
-  return data.result.map((item) => item.name)
-}
-
-/**
- * Deletes a key from Cloudflare KV.
- * @private
- */
-function deleteCloudflareKVKey_(config, key) {
-  const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/values/${encodeURIComponent(key)}`
-  const options = {
-    method: 'delete',
-    headers: { Authorization: `Bearer ${config.apiToken}` },
-    muteHttpExceptions: true
-  }
-  const response = UrlFetchApp.fetch(apiUrl, options)
-  if (response.getResponseCode() !== 200 && response.getResponseCode() !== 404) {
-    throw new Error(`Failed to delete KV key "${key}": ${response.getContentText()}`)
-  }
-}
-
-/**
  * Fetches data from the spreadsheet and syncs it to Cloudflare KV.
  * Also deletes keys from KV that are not present in the sheet.
  */
@@ -141,26 +106,31 @@ function syncSheetToKV() {
   try {
     const config = getCloudflareConfig_()
     validateConfig_(config)
+    const apiClient = new CloudflareApiClient(config, UrlFetchApp.fetch)
     const ui = SpreadsheetApp.getUi()
 
-    SpreadsheetApp.getActiveSpreadsheet().toast('転送リストをシートから読み込み中...', '同期ステップ 1/4', -1)
-    const records = getForwardingData_()
+    SpreadsheetApp.getActiveSpreadsheet().toast('転送リストをシートから読み込み中...', '同期ステップ 1/5', -1)
+    let records = getForwardingData_(config)
     if (records.length === 0) {
       SpreadsheetApp.getActiveSpreadsheet().toast('同期するデータがありません。', '情報', 5)
       return
     }
 
-    SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflareからメールアドレスの状態を取得中...', '同期ステップ 2/4', -1)
-    if (!checkAndHandleUnverifiedEmails_(config, records, ui)) {
+    SpreadsheetApp.getActiveSpreadsheet().toast('転送グループを解決中...', '同期ステップ 2/5', -1)
+    try {
+      records = resolveAndFlattenDestinations(records, config.domainName)
+    } catch (e) {
+      ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`)
+      throw e
+    }
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflareからメールアドレスの状態を取得中...', '同期ステップ 3/5', -1)
+    if (!checkAndHandleUnverifiedEmails_(apiClient, records, ui)) {
       return // 未認証アドレスがあればここで終了
     }
 
-    SpreadsheetApp.getActiveSpreadsheet().toast(
-      'すべてのアドレスが認証済みです。Cloudflareへ同期中...',
-      '同期ステップ 3/4',
-      -1
-    )
-    syncRecordsToCloudflare_(config, records)
+    SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflare KVへデータを同期中...', '同期ステップ 4/5', -1)
+    syncRecordsToCloudflare_(apiClient, records)
   } catch (e) {
     Logger.log(`エラー: ${e.message}`)
     SpreadsheetApp.getActiveSpreadsheet().toast(`エラーが発生しました: ${e.message}`, '実行失敗', 10)
@@ -172,9 +142,60 @@ function syncSheetToKV() {
   }
 }
 
+/**
+ * Performs a dry run of the sync process and outputs the results to a sheet.
+ */
+function dryRunSync() {
+  const SPREADSHEET_URL = SpreadsheetApp.getActiveSpreadsheet().getUrl()
+  try {
+    const config = getCloudflareConfig_()
+    validateConfig_(config)
+    const apiClient = new CloudflareApiClient(config, UrlFetchApp.fetch)
+    const ui = SpreadsheetApp.getUi()
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('Dry Run: 転送リストを読み込み中...', 'Dry Run', -1)
+    let records = getForwardingData_(config)
+    if (records.length === 0) {
+      SpreadsheetApp.getActiveSpreadsheet().toast('同期するデータがありません。', '情報', 5)
+      return
+    }
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('Dry Run: 転送グループを解決中...', 'Dry Run', -1)
+    try {
+      records = resolveAndFlattenDestinations(records, config.domainName)
+    } catch (e) {
+      ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`)
+      throw e
+    }
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('Dry Run: 変更点を計算中...', 'Dry Run', -1)
+    // Get info without UI interaction or writing data
+    const unverifiedInfo = getUnverifiedEmailInfo_(apiClient, records)
+    const syncPlan = getSyncPlan_(apiClient, records)
+
+    // Write report
+    writeDryRunReport_(syncPlan, unverifiedInfo)
+
+    const resultSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('dry-run-result')
+    SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(resultSheet)
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      'Dry Runが完了しました。結果シートを確認してください。',
+      'Dry Run 完了',
+      10
+    )
+  } catch (e) {
+    Logger.log(`Dry Run エラー: ${e.message}`)
+    SpreadsheetApp.getUi().alert(
+      'Dry Run エラー',
+      `処理中にエラーが発生しました。\n\n${e.message}\n\n詳細はログをご確認ください。`,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    )
+  }
+}
+
 // 未認証アドレスの確認・登録・ユーザー通知
-function checkAndHandleUnverifiedEmails_(config, records, ui) {
-  const allCfAddresses = getDestinationAddresses_(config)
+function checkAndHandleUnverifiedEmails_(apiClient, records, ui) {
+  const allCfAddresses = apiClient.getDestinationAddresses()
   const verifiedEmailsSet = new Set(allCfAddresses.verified)
   const pendingEmailsSet = new Set(allCfAddresses.pending)
 
@@ -189,9 +210,7 @@ function checkAndHandleUnverifiedEmails_(config, records, ui) {
 
   const emailsPendingVerification = unverifiedEmails.filter((email) => pendingEmailsSet.has(email))
   const emailsToCreate = unverifiedEmails.filter((email) => !pendingEmailsSet.has(email))
-
   let creationResults = { success: [], failed: [] }
-
   if (emailsToCreate.length > 0) {
     const confirmMsg = `以下のメールアドレスはCloudflareに未登録です。\n\n- ${emailsToCreate.join('\n- ')}\n\n自動でCloudflareに登録しますか？（typo等がないかご確認ください）`
     const uiResult = ui.alert('未登録アドレスの確認', confirmMsg, ui.ButtonSet.YES_NO)
@@ -199,8 +218,8 @@ function checkAndHandleUnverifiedEmails_(config, records, ui) {
       SpreadsheetApp.getActiveSpreadsheet().toast('同期を中断しました。', '中断', 5)
       return false
     }
-    SpreadsheetApp.getActiveSpreadsheet().toast('新しいメールアドレスを作成中...', '同期ステップ 3/4', -1)
-    creationResults = createDestinationAddresses_(config, emailsToCreate)
+    SpreadsheetApp.getActiveSpreadsheet().toast('新しいメールアドレスを作成中...', '同期ステップ 4/5', -1)
+    creationResults = createDestinationAddresses_(apiClient, emailsToCreate)
   }
 
   let message = ''
@@ -219,14 +238,31 @@ function checkAndHandleUnverifiedEmails_(config, records, ui) {
   return false
 }
 
+/**
+ * Gathers information about unverified emails without any UI interaction.
+ * @private
+ */
+function getUnverifiedEmailInfo_(apiClient, records) {
+  const allCfAddresses = apiClient.getDestinationAddresses()
+  const verifiedEmailsSet = new Set(allCfAddresses.verified)
+  const pendingEmailsSet = new Set(allCfAddresses.pending)
+  const allDestinationEmails = records.flatMap((record) => JSON.parse(record.value))
+  const uniqueDestinationEmails = [...new Set(allDestinationEmails)]
+  const unverifiedEmails = uniqueDestinationEmails.filter((email) => !verifiedEmailsSet.has(email))
+  return {
+    emailsToCreate: unverifiedEmails.filter((email) => !pendingEmailsSet.has(email)),
+    emailsPendingVerification: unverifiedEmails.filter((email) => pendingEmailsSet.has(email))
+  }
+}
+
 // KVの削除・同期
-function syncRecordsToCloudflare_(config, records) {
+function syncRecordsToCloudflare_(apiClient, records) {
   const sheetKeys = records.map((r) => r.key)
-  const kvKeys = listCloudflareKVKeys_(config)
-  const keysToDelete = kvKeys.filter((k) => !sheetKeys.includes(k))
+  const kvKeys = apiClient.listKvKeys()
+  const keysToDelete = determineKeysToDelete(sheetKeys, kvKeys)
 
   keysToDelete.forEach((key) => {
-    deleteCloudflareKVKey_(config, key)
+    apiClient.deleteKvKey(key)
     Logger.log(`Deleted KV key: ${key}`)
   })
 
@@ -236,109 +272,43 @@ function syncRecordsToCloudflare_(config, records) {
     return
   }
 
-  const response = updateCloudflareKV_(config, records)
+  const response = apiClient.updateKvBulk(records)
   handleApiResponse_(response)
+}
+
+/**
+ * Calculates the changes to be made in KV without actually performing them.
+ * @private
+ */
+function getSyncPlan_(apiClient, records) {
+  const sheetKeys = records.map((r) => r.key)
+  const kvKeys = apiClient.listKvKeys()
+  return {
+    keysToDelete: determineKeysToDelete(sheetKeys, kvKeys),
+    recordsToUpdate: records
+  }
 }
 
 /**
  * Attempts to create new destination addresses in Cloudflare Email Routing.
  * @private
  */
-function createDestinationAddresses_(config, emailsToCreate) {
+function createDestinationAddresses_(apiClient, emailsToCreate) {
   const success = []
   const failed = []
 
   emailsToCreate.forEach((email) => {
-    const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/email/routing/addresses`
-    const options = {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { Authorization: `Bearer ${config.apiToken}` },
-      payload: JSON.stringify({ email: email }),
-      muteHttpExceptions: true
-    }
-
-    const response = UrlFetchApp.fetch(apiUrl, options)
-    const responseCode = response.getResponseCode()
-    const responseBody = response.getContentText()
-
-    if (responseCode === 200) {
-      const json = JSON.parse(responseBody)
-      if (json.success) {
-        Logger.log(`Successfully created destination address: ${email}`)
-        success.push(email)
-      } else {
-        Logger.log(`Failed to create destination address ${email}. API Error: ${responseBody}`)
-        failed.push(email)
-      }
+    const result = apiClient.createDestinationAddress(email)
+    if (result.success) {
+      Logger.log(`Successfully created destination address: ${email}`)
+      success.push(email)
     } else {
-      Logger.log(
-        `Failed to create destination address ${email}. HTTP Status: ${responseCode}, Response: ${responseBody}`
-      )
+      Logger.log(`Failed to create destination address ${email}. API Error: ${result.body}`)
       failed.push(email)
     }
   })
 
   return { success, failed }
-}
-
-/**
- * Retrieves all destination email addresses from Cloudflare Email Routing,
- * categorized by their verification status.
- * @private
- */
-function getDestinationAddresses_(config) {
-  const addresses = {
-    verified: [],
-    pending: []
-  }
-  let page = 1
-  let hasMorePages = true
-
-  while (hasMorePages) {
-    const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/email/routing/addresses?page=${page}&per_page=100`
-    const options = {
-      method: 'get',
-      contentType: 'application/json',
-      headers: { Authorization: `Bearer ${config.apiToken}` },
-      muteHttpExceptions: true
-    }
-
-    const response = UrlFetchApp.fetch(apiUrl, options)
-    const responseCode = response.getResponseCode()
-    const responseBody = response.getContentText()
-
-    if (responseCode !== 200) {
-      Logger.log(`Error fetching destination addresses: Status Code ${responseCode}, Response: ${responseBody}`)
-      throw new Error('Could not fetch destination email addresses from Cloudflare. Check logs.')
-    }
-
-    const json = JSON.parse(responseBody)
-    if (!json.success) {
-      Logger.log(`API error while fetching destination addresses: ${JSON.stringify(json.errors)}`)
-      throw new Error('Cloudflare API returned an error while fetching destination addresses.')
-    }
-
-    json.result.forEach((addr) => {
-      if (addr.verified) {
-        addresses.verified.push(addr.email)
-      } else {
-        addresses.pending.push(addr.email)
-      }
-    })
-
-    const totalPages =
-      json.result_info && json.result_info.total_count
-        ? Math.ceil(json.result_info.total_count / json.result_info.per_page)
-        : 1
-    if (page >= totalPages || totalPages === 0) {
-      hasMorePages = false
-    } else {
-      page++
-    }
-  }
-
-  return addresses
 }
 
 /**
@@ -353,11 +323,12 @@ function getCloudflareConfig_() {
     )
 
   // Get Account ID and Namespace ID from the sheet
-  const data = sheet.getRange('A1:B2').getValues()
+  const data = sheet.getRange('A1:B3').getValues()
   const config = {}
   data.forEach((row) => {
     if (row[0] === 'CF_ACCOUNT_ID') config.accountId = row[1]
     if (row[0] === 'CF_NAMESPACE_ID') config.namespaceId = row[1]
+    if (row[0] === 'DOMAIN_NAME') config.domainName = row[1]
   })
 
   // Get the API Token from Script Properties for better security
@@ -372,9 +343,9 @@ function getCloudflareConfig_() {
  * @private
  */
 function validateConfig_(config) {
-  if (!config.accountId || !config.namespaceId || !config.apiToken) {
+  if (!config.accountId || !config.namespaceId || !config.apiToken || !config.domainName) {
     throw new Error(
-      'Required info (Account ID, Namespace ID, API Token) is missing. Make sure to set the API Token in the Script Properties.'
+      'Required info (Account ID, Namespace ID, Domain Name, API Token) is missing. Please fill in the settings sheet and set the API Token in the Script Properties.'
     )
   }
 }
@@ -383,7 +354,7 @@ function validateConfig_(config) {
  * Retrieves and formats the forwarding list data.
  * @private
  */
-function getForwardingData_() {
+function getForwardingData_(config) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(DATA_SHEET_NAME)
   if (!sheet)
     throw new Error(`Data sheet named '${DATA_SHEET_NAME}' not found. Please run "Initialize Sheet" from the menu.`)
@@ -391,56 +362,21 @@ function getForwardingData_() {
   const values = sheet.getDataRange().getValues()
   if (values.length <= 1) return []
 
-  // メールアドレスのバリデーション用正規表現
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-
-  for (let rowIdx = 1; rowIdx < values.length; rowIdx++) {
-    // 1行目はヘッダー
-    const row = values[rowIdx]
-    for (let colIdx = 1; colIdx < row.length; colIdx++) {
-      // 1列目はグループアドレス
-      const email = row[colIdx]
-      if (email && !emailRegex.test(email)) {
-        // 該当セルを選択
-        sheet.setActiveRange(sheet.getRange(rowIdx + 1, colIdx + 1))
-        SpreadsheetApp.getUi().alert(
-          `メールアドレスの形式が正しくありません: "${email}"\nセル: ${sheet.getRange(rowIdx + 1, colIdx + 1).getA1Notation()}`
-        )
-        throw new Error(`Invalid email address: ${email}`)
-      }
+  try {
+    // Call the pure function from CoreLogic.js
+    return processForwardingData(values, config)
+  } catch (e) {
+    // Catch errors from the core logic and handle them in the GAS environment (e.g., show UI alerts)
+    const rowMatch = e.message.match(/row (\d+)/)
+    const colMatch = e.message.match(/column (\d+)/)
+    if (rowMatch && colMatch) {
+      const errorRow = parseInt(rowMatch[1], 10)
+      const errorCol = parseInt(colMatch[1], 10)
+      sheet.setActiveRange(sheet.getRange(errorRow, errorCol))
     }
+    SpreadsheetApp.getUi().alert(`データ形式エラー`, `シートのデータに問題があります。\n\n${e.message}`)
+    throw e // Re-throw to stop the sync process
   }
-
-  return values
-    .slice(1) // Skip header row
-    .map((row) => {
-      const key = row[0] // Group address
-      const valueArray = row.slice(1).filter((email) => email && emailRegex.test(email))
-      if (key && valueArray.length > 0) {
-        return {
-          key: key,
-          value: JSON.stringify(valueArray)
-        }
-      }
-      return null
-    })
-    .filter(Boolean)
-}
-
-/**
- * Sends the data to the Cloudflare KV bulk write API.
- * @private
- */
-function updateCloudflareKV_(config, payload) {
-  const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/storage/kv/namespaces/${config.namespaceId}/bulk`
-  const options = {
-    method: 'put',
-    contentType: 'application/json',
-    headers: { Authorization: `Bearer ${config.apiToken}` },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  }
-  return UrlFetchApp.fetch(apiUrl, options)
 }
 
 /**
@@ -463,4 +399,62 @@ function handleApiResponse_(response) {
     )
     throw new Error(`APIリクエストに失敗しました。詳細はログをご確認ください。`)
   }
+}
+
+/**
+ * Writes the results of a dry run to a dedicated sheet.
+ * @private
+ */
+function writeDryRunReport_(syncPlan, unverifiedInfo) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet()
+  const sheetName = 'dry-run-result'
+  let sheet = ss.getSheetByName(sheetName)
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName)
+  } else {
+    sheet.clear()
+  }
+
+  let currentRow = 1
+
+  // --- Records to Update ---
+  sheet.getRange(currentRow, 1).setValue('■ KVへ投入されるデータ (更新/作成)').setFontWeight('bold')
+  currentRow++
+  if (syncPlan.recordsToUpdate.length > 0) {
+    sheet
+      .getRange(currentRow, 1, 1, 2)
+      .setValues([['キー', '値']])
+      .setFontWeight('bold')
+    const updateData = syncPlan.recordsToUpdate.map((r) => [r.key, r.value])
+    sheet.getRange(currentRow + 1, 1, updateData.length, 2).setValues(updateData)
+    currentRow += updateData.length + 2
+  } else {
+    sheet.getRange(currentRow, 1).setValue('なし')
+    currentRow += 2
+  }
+
+  // --- Records to Delete ---
+  sheet.getRange(currentRow, 1).setValue('■ KVから削除されるデータ').setFontWeight('bold')
+  currentRow++
+  if (syncPlan.keysToDelete.length > 0) {
+    const deleteData = syncPlan.keysToDelete.map((k) => [k])
+    sheet.getRange(currentRow, 1, deleteData.length, 1).setValues(deleteData)
+    currentRow += deleteData.length + 2
+  } else {
+    sheet.getRange(currentRow, 1).setValue('なし')
+    currentRow += 2
+  }
+
+  // --- Unverified Emails ---
+  sheet.getRange(currentRow, 1).setValue('■ 要認証 / 要作成のアドレス').setFontWeight('bold')
+  currentRow++
+  const allUnverified = [...unverifiedInfo.emailsToCreate, ...unverifiedInfo.emailsPendingVerification]
+  if (allUnverified.length > 0) {
+    const unverifiedData = allUnverified.map((e) => [e])
+    sheet.getRange(currentRow, 1, unverifiedData.length, 1).setValues(unverifiedData)
+  } else {
+    sheet.getRange(currentRow, 1).setValue('なし')
+  }
+
+  sheet.autoResizeColumns(1, 2)
 }
