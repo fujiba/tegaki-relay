@@ -62,8 +62,10 @@ function initializeSheet() {
     const finalDataSheet = ss.getSheetByName(DATA_SHEET_NAME)
 
     // Set headers and formatting
-    finalSettingsSheet.getRange('A1:A3').setValues([['CF_ACCOUNT_ID'], ['CF_NAMESPACE_ID'], ['DOMAIN_NAME']])
-    finalSettingsSheet.getRange('A1:A3').setFontWeight('bold')
+    finalSettingsSheet
+      .getRange('A1:A4')
+      .setValues([['CF_ACCOUNT_ID'], ['CF_NAMESPACE_ID'], ['CF_ZONE_ID'], ['DOMAIN_NAME']])
+    finalSettingsSheet.getRange('A1:A4').setFontWeight('bold')
     finalDataSheet
       .getRange('A1:K1')
       .setValues([
@@ -120,28 +122,60 @@ function syncSheetToKV() {
     validateConfig_(config)
     const apiClient = new CloudflareApiClient(config, UrlFetchApp.fetch)
 
-    SpreadsheetApp.getActiveSpreadsheet().toast('転送リストをシートから読み込み中...', '同期ステップ 1/5', -1)
-    let records = getForwardingData_(config)
-    if (records.length === 0) {
+    SpreadsheetApp.getActiveSpreadsheet().toast('転送リストをシートから読み込み中...', '同期ステップ 1/6', -1)
+    const originalSheetRecords = getForwardingData_(config)
+    if (originalSheetRecords.length === 0) {
       SpreadsheetApp.getActiveSpreadsheet().toast('同期するデータがありません。', '情報', 5)
       return
     }
 
-    SpreadsheetApp.getActiveSpreadsheet().toast('転送グループを解決中...', '同期ステップ 2/5', -1)
+    let flattenedRecordsForKv
+    let cloudflareRules
+    SpreadsheetApp.getActiveSpreadsheet().toast('転送グループを解決中...', '同期ステップ 2/6', -1)
     try {
-      records = resolveAndFlattenDestinations(records, config.domainName)
+      cloudflareRules = apiClient.listRoutingRules()
+      const reconciliationResult = reconcileRules(originalSheetRecords, cloudflareRules)
+
+      if (reconciliationResult.conflicts.length > 0) {
+        const conflictAnalysis = { conflictingRules: reconciliationResult.conflicts, unmanagedRules: [] }
+        writeDryRunReport_({}, {}, conflictAnalysis, cloudflareRules, '競合レポート')
+        const resultSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('競合レポート')
+        SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(resultSheet)
+        ui.alert(
+          '設定の競合',
+          'スプレッドシートとCloudflareの設定に競合が見つかりました。\n\n処理を安全に中止しました。「競合レポート」シートを確認してください。',
+          ui.ButtonSet.OK
+        )
+        return
+      }
+
+      // Flatten the destinations for the records that are actually going to KV
+      flattenedRecordsForKv = resolveAndFlattenDestinations(
+        reconciliationResult.recordsForKv,
+        config.domainName,
+        cloudflareRules
+      )
     } catch (e) {
       ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`, ui.ButtonSet.OK)
       return // エラーを再スローせず、ここで処理を終了する
     }
 
-    SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflareからメールアドレスの状態を取得中...', '同期ステップ 3/5', -1)
-    if (!checkAndHandleUnverifiedEmails_(apiClient, records, ui)) {
+    SpreadsheetApp.getActiveSpreadsheet().toast('変更点を計算中...', '同期ステップ 3/6', -1)
+    const syncPlan = getSyncPlan_(apiClient, flattenedRecordsForKv)
+    const unverifiedInfo = getUnverifiedEmailInfo_(apiClient, flattenedRecordsForKv)
+    const analysis = analyzeDiscrepancies_(originalSheetRecords, cloudflareRules)
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflareからメールアドレスの状態を取得中...', '同期ステップ 4/6', -1)
+    if (!checkAndHandleUnverifiedEmails_(apiClient, flattenedRecordsForKv, ui)) {
       return // 未認証アドレスがあればここで終了
     }
 
-    SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflare KVへデータを同期中...', '同期ステップ 4/5', -1)
-    syncRecordsToCloudflare_(apiClient, records)
+    SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflare KVへデータを同期中...', '同期ステップ 5/6', -1)
+    syncRecordsToCloudflare_(apiClient, flattenedRecordsForKv)
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('実行ログを書き出し中...', '同期ステップ 6/6', -1)
+    const reportSheetName = `sync-log-${getTimestamp_()}`
+    writeDryRunReport_(syncPlan, unverifiedInfo, analysis, cloudflareRules, reportSheetName)
   } catch (e) {
     Logger.log(`エラー: ${e.message}`)
     SpreadsheetApp.getActiveSpreadsheet().toast(`エラーが発生しました: ${e.message}`, '実行失敗', 10)
@@ -173,19 +207,33 @@ function dryRunSync() {
 
     SpreadsheetApp.getActiveSpreadsheet().toast('Dry Run: 転送グループを解決中...', 'Dry Run', -1)
     try {
-      records = resolveAndFlattenDestinations(records, config.domainName)
+      const cloudflareRules = apiClient.listRoutingRules()
+      const reconciliationResult = reconcileRules(records, cloudflareRules)
+
+      if (reconciliationResult.conflicts.length > 0) {
+        ui.alert(
+          '設定の競合',
+          'スプレッドシートとCloudflareの設定に競合が見つかりました。\n\nDry Runレポートに詳細を出力します。',
+          ui.ButtonSet.OK
+        )
+      }
+
+      // Flatten destinations for the records intended for KV
+      const recordsForKv = resolveAndFlattenDestinations(
+        reconciliationResult.recordsForKv,
+        config.domainName,
+        cloudflareRules
+      )
+      const unverifiedInfo = getUnverifiedEmailInfo_(apiClient, recordsForKv)
+      const syncPlan = getSyncPlan_(apiClient, recordsForKv)
+      const analysis = analyzeDiscrepancies_(records, cloudflareRules) // Analyze original sheet data for full report
+
+      // Write report
+      writeDryRunReport_(syncPlan, unverifiedInfo, analysis, cloudflareRules)
     } catch (e) {
       ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`, ui.ButtonSet.OK)
       return // エラーを再スローせず、ここで処理を終了する
     }
-
-    SpreadsheetApp.getActiveSpreadsheet().toast('Dry Run: 変更点を計算中...', 'Dry Run', -1)
-    // Get info without UI interaction or writing data
-    const unverifiedInfo = getUnverifiedEmailInfo_(apiClient, records)
-    const syncPlan = getSyncPlan_(apiClient, records)
-
-    // Write report
-    writeDryRunReport_(syncPlan, unverifiedInfo)
 
     const resultSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('dry-run-result')
     SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(resultSheet)
@@ -301,6 +349,44 @@ function getSyncPlan_(apiClient, records) {
 }
 
 /**
+ * Analyzes discrepancies between spreadsheet rules and Cloudflare Email Routing rules.
+ * @private
+ */
+function analyzeDiscrepancies_(sheetRecords, cloudflareRules) {
+  const sheetRulesMap = new Map(sheetRecords.map((r) => [r.key, JSON.parse(r.value).sort()]))
+
+  const unmanagedRules = []
+  const conflictingRules = []
+
+  // Check for rules that exist on Cloudflare but not in the sheet
+  for (const [cfKey, cfValue] of cloudflareRules.entries()) {
+    if (!sheetRulesMap.has(cfKey)) {
+      unmanagedRules.push({
+        key: cfKey,
+        value: JSON.stringify(cfValue)
+      })
+    }
+  }
+
+  // Check for rules that exist in both but have different destinations
+  for (const [sheetKey, sheetValue] of sheetRulesMap.entries()) {
+    if (cloudflareRules.has(sheetKey)) {
+      const cfValue = cloudflareRules.get(sheetKey)
+      // Compare sorted arrays by converting them to strings
+      if (JSON.stringify(sheetValue) !== JSON.stringify(cfValue)) {
+        conflictingRules.push({
+          key: sheetKey,
+          sheetValue: JSON.stringify(sheetValue),
+          cfValue: JSON.stringify(cfValue)
+        })
+      }
+    }
+  }
+
+  return { unmanagedRules, conflictingRules }
+}
+
+/**
  * Attempts to create new destination addresses in Cloudflare Email Routing.
  * @private
  */
@@ -334,11 +420,12 @@ function getCloudflareConfig_() {
     )
 
   // Get Account ID and Namespace ID from the sheet
-  const data = sheet.getRange('A1:B3').getValues()
+  const data = sheet.getRange('A1:B4').getValues()
   const config = {}
   data.forEach((row) => {
     if (row[0] === 'CF_ACCOUNT_ID') config.accountId = row[1]
     if (row[0] === 'CF_NAMESPACE_ID') config.namespaceId = row[1]
+    if (row[0] === 'CF_ZONE_ID') config.zoneId = row[1]
     if (row[0] === 'DOMAIN_NAME') config.domainName = row[1]
   })
 
@@ -360,6 +447,9 @@ function validateConfig_(config) {
   }
   if (!config.namespaceId) {
     missingItems.push('CF_NAMESPACE_ID (settingsシート)')
+  }
+  if (!config.zoneId) {
+    missingItems.push('CF_ZONE_ID (settingsシート)')
   }
   if (!config.domainName) {
     missingItems.push('DOMAIN_NAME (settingsシート)')
@@ -433,9 +523,8 @@ function handleApiResponse_(response) {
  * Writes the results of a dry run to a dedicated sheet.
  * @private
  */
-function writeDryRunReport_(syncPlan, unverifiedInfo) {
+function writeDryRunReport_(syncPlan, unverifiedInfo, analysis, cloudflareRules, sheetName = 'dry-run-result') {
   const ss = SpreadsheetApp.getActiveSpreadsheet()
-  const sheetName = 'dry-run-result'
   let sheet = ss.getSheetByName(sheetName)
   if (!sheet) {
     sheet = ss.insertSheet(sheetName)
@@ -480,9 +569,78 @@ function writeDryRunReport_(syncPlan, unverifiedInfo) {
   if (allUnverified.length > 0) {
     const unverifiedData = allUnverified.map((e) => [e])
     sheet.getRange(currentRow, 1, unverifiedData.length, 1).setValues(unverifiedData)
+    currentRow += unverifiedData.length + 2
+  } else {
+    sheet.getRange(currentRow, 1).setValue('なし')
+    currentRow += 2
+  }
+
+  // --- Conflicting Rules ---
+  sheet
+    .getRange(currentRow, 1)
+    .setValue('■ 警告: 転送先が不一致のルール (シートとCloudflareで内容が異なる)')
+    .setFontWeight('bold')
+  currentRow++
+  if (analysis.conflictingRules.length > 0) {
+    sheet
+      .getRange(currentRow, 1, 1, 3)
+      .setValues([['キー', 'シート上の転送先', 'Cloudflare上の転送先']])
+      .setFontWeight('bold')
+    const conflictData = analysis.conflictingRules.map((r) => [r.key, r.sheetValue, r.cfValue])
+    sheet.getRange(currentRow + 1, 1, conflictData.length, 3).setValues(conflictData)
+    currentRow += conflictData.length + 2
+  } else {
+    sheet.getRange(currentRow, 1).setValue('なし')
+    currentRow += 2
+  }
+
+  // --- Unmanaged Rules ---
+  sheet
+    .getRange(currentRow, 1)
+    .setValue('■ 情報: スプレッドシート未管理のルール (Cloudflare上にのみ存在)')
+    .setFontWeight('bold')
+  currentRow++
+  if (analysis.unmanagedRules.length > 0) {
+    sheet
+      .getRange(currentRow, 1, 1, 2)
+      .setValues([['キー', 'Cloudflare上の転送先']])
+      .setFontWeight('bold')
+    const unmanagedData = analysis.unmanagedRules.map((r) => [r.key, r.value])
+    sheet.getRange(currentRow + 1, 1, unmanagedData.length, 2).setValues(unmanagedData)
+    currentRow += unmanagedData.length + 2
+  } else {
+    sheet.getRange(currentRow, 1).setValue('なし')
+    currentRow += 2
+  }
+
+  // --- All Cloudflare Rules (Reference) ---
+  sheet.getRange(currentRow, 1).setValue('■ 参考: Cloudflare Email Routing上の全ルール').setFontWeight('bold')
+  currentRow++
+  if (cloudflareRules.size > 0) {
+    sheet
+      .getRange(currentRow, 1, 1, 2)
+      .setValues([['ルール (宛先)', '転送先']])
+      .setFontWeight('bold')
+    const allRulesData = Array.from(cloudflareRules.entries()).map(([key, value]) => [key, JSON.stringify(value)])
+    sheet.getRange(currentRow + 1, 1, allRulesData.length, 2).setValues(allRulesData)
   } else {
     sheet.getRange(currentRow, 1).setValue('なし')
   }
 
-  sheet.autoResizeColumns(1, 2)
+  sheet.autoResizeColumns(1, 3)
+}
+
+/**
+ * Generates a timestamp string for sheet names.
+ * @private
+ */
+function getTimestamp_() {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = (now.getMonth() + 1).toString().padStart(2, '0')
+  const day = now.getDate().toString().padStart(2, '0')
+  const hours = now.getHours().toString().padStart(2, '0')
+  const minutes = now.getMinutes().toString().padStart(2, '0')
+  const seconds = now.getSeconds().toString().padStart(2, '0')
+  return `${year}-${month}-${day}-${hours}${minutes}${seconds}`
 }

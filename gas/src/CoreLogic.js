@@ -63,8 +63,16 @@ function determineKeysToDelete(sheetKeys, kvKeys) {
  * @param {string} domainName The user's domain name.
  * @returns {{key: string, value: string}[]} The flattened records.
  */
-function resolveAndFlattenDestinations(records, domainName) {
+function resolveAndFlattenDestinations(records, domainName, cloudflareRules = new Map()) {
+  // Combine sheet records and cloudflare rules into a single source of truth for resolution.
+  // Sheet records take precedence if a key exists in both.
   const groupMap = new Map(records.map((r) => [r.key, JSON.parse(r.value)]))
+  for (const [key, value] of cloudflareRules.entries()) {
+    if (!groupMap.has(key)) {
+      groupMap.set(key, value)
+    }
+  }
+
   const memo = new Map() // Memoization for already resolved groups
 
   const resolve = (groupAddress, path) => {
@@ -78,7 +86,7 @@ function resolveAndFlattenDestinations(records, domainName) {
       return memo.get(groupAddress)
     }
 
-    // 3. 未定義グループの検出
+    // 3. 未定義グループの検出 (now checks combined map)
     if (!groupMap.has(groupAddress)) {
       throw new Error(`定義されていないグループを参照しています: ${groupAddress}`)
     }
@@ -104,6 +112,7 @@ function resolveAndFlattenDestinations(records, domainName) {
     return result
   }
 
+  // We only need to resolve the groups that are actually in the original sheet records.
   const finalRecords = records.map((record) => {
     const flattenedDestinations = resolve(record.key, [])
     return {
@@ -116,6 +125,41 @@ function resolveAndFlattenDestinations(records, domainName) {
 }
 
 /**
+ * Reconciles rules from the sheet with rules from Cloudflare.
+ * - Identifies conflicts.
+ * - Determines which records should actually be written to KV.
+ * @param {{key: string, value: string}[]} sheetRecords The records from the sheet.
+ * @param {Map<string, string[]>} cloudflareRules The rules from Cloudflare.
+ * @returns {{recordsForKv: {key: string, value: string}[], conflicts: {key: string, sheetValue: string, cfValue: string}[]}}
+ */
+function reconcileRules(sheetRecords, cloudflareRules) {
+  const recordsForKv = []
+  const conflictingRules = []
+
+  for (const record of sheetRecords) {
+    const sheetKey = record.key
+    const sheetValue = JSON.parse(record.value).sort()
+
+    if (cloudflareRules.has(sheetKey)) {
+      const cfValue = cloudflareRules.get(sheetKey) // Already sorted
+      // Conflict
+      if (JSON.stringify(sheetValue) !== JSON.stringify(cfValue)) {
+        conflictingRules.push({
+          key: sheetKey,
+          sheetValue: JSON.stringify(sheetValue),
+          cfValue: JSON.stringify(cfValue)
+        })
+      }
+      // Match: Do nothing, this record will not be sent to KV.
+    } else {
+      // Sheet-only rule: This should be sent to KV.
+      recordsForKv.push(record)
+    }
+  }
+  return { recordsForKv, conflicts: conflictingRules }
+}
+
+/**
  * For local testing with Node.js (vitest).
  * This block is ignored in the Google Apps Script environment.
  */
@@ -123,6 +167,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     processForwardingData,
     determineKeysToDelete,
-    resolveAndFlattenDestinations
+    resolveAndFlattenDestinations,
+    reconcileRules
   }
 }

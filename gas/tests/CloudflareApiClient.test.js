@@ -123,4 +123,45 @@ describe('CloudflareApiClient', () => {
       pending: ['b@b.com']
     })
   })
+
+  it('listRoutingRulesはページネーションを処理し、ルールをMapとして正しく返す', () => {
+    // 1ページ目のレスポンス
+    mockFetch.mockReturnValueOnce({
+      getResponseCode: () => 200,
+      getContentText: () =>
+        JSON.stringify({
+          success: true,
+          result: [
+            {
+              matchers: [{ type: 'literal', field: 'to', value: 'rule1@example.com' }],
+              actions: [{ type: 'forward', value: ['dest1@external.com'] }]
+            }
+          ],
+          result_info: { page: 1, per_page: 1, total_count: 2, total_pages: 2 }
+        })
+    })
+    // 2ページ目のレスポンス
+    mockFetch.mockReturnValueOnce({
+      getResponseCode: () => 200,
+      getContentText: () =>
+        JSON.stringify({
+          success: true,
+          result: [
+            {
+              matchers: [{ type: 'literal', field: 'to', value: 'rule2@example.com' }],
+              actions: [{ type: 'forward', value: ['dest3@external.com', 'dest2@external.com'] }, { type: 'stop' }]
+            }
+          ],
+          result_info: { page: 2, per_page: 1, total_count: 2, total_pages: 2 }
+        })
+    })
+
+    const rules = apiClient.listRoutingRules()
+
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+    const expectedMap = new Map()
+    expectedMap.set('rule1@example.com', ['dest1@external.com'])
+    expectedMap.set('rule2@example.com', ['dest2@external.com', 'dest3@external.com']) // The implementation sorts the destinations
+    expect(rules).toEqual(expectedMap)
+  })
 })

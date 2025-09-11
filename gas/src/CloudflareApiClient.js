@@ -138,6 +138,53 @@ class CloudflareApiClient {
     }
     return addresses
   }
+
+  /**
+   * Retrieves all email routing rules.
+   * @returns {Map<string, string[]>} A map where the key is the routing address and the value is an array of destination emails.
+   */
+  listRoutingRules() {
+    const rulesMap = new Map()
+    let page = 1
+    let hasMorePages = true
+
+    while (hasMorePages) {
+      const apiUrl = `${this.baseApiUrl}/zones/${this.config.zoneId}/email/routing/rules?page=${page}&per_page=100`
+      const options = {
+        method: 'get',
+        headers: { Authorization: `Bearer ${this.config.apiToken}` },
+        muteHttpExceptions: true
+      }
+
+      const response = this.fetcher(apiUrl, options)
+      if (response.getResponseCode() !== 200) {
+        throw new Error(`Could not fetch email routing rules from Cloudflare. Body: ${response.getContentText()}`)
+      }
+
+      const json = JSON.parse(response.getContentText())
+      if (!json.success) {
+        throw new Error('Cloudflare API returned an error while fetching email routing rules.')
+      }
+
+      json.result.forEach((rule) => {
+        // We only care about literal "to" matchers
+        const literalMatcher = rule.matchers.find((m) => m.type === 'literal' && m.field === 'to')
+
+        if (literalMatcher) {
+          // and "forward" actions
+          const destinations = rule.actions.filter((a) => a.type === 'forward').flatMap((a) => a.value)
+          if (destinations.length > 0) {
+            rulesMap.set(literalMatcher.value, destinations.sort())
+          }
+        }
+      })
+
+      const totalPages = json.result_info ? Math.ceil(json.result_info.total_count / json.result_info.per_page) : 1
+      hasMorePages = page < totalPages
+      page++
+    }
+    return rulesMap
+  }
 }
 
 /**
