@@ -46,3 +46,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 node_modules
+
+# clasp (for Google Apps Script in /apps-script)
+.clasp.json
