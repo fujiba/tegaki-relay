@@ -104,10 +104,21 @@ function initializeSheet() {
  */
 function syncSheetToKV() {
   try {
+    const ui = SpreadsheetApp.getUi()
+    const confirmResponse = ui.alert(
+      '本番環境へ同期します',
+      'Cloudflare上の設定が上書きされます。よろしいですか？\n\n（事前にDry Runの実行を推奨します）',
+      ui.ButtonSet.YES_NO
+    )
+
+    if (confirmResponse !== ui.Button.YES) {
+      SpreadsheetApp.getActiveSpreadsheet().toast('同期をキャンセルしました。', 'キャンセル', 5)
+      return
+    }
+
     const config = getCloudflareConfig_()
     validateConfig_(config)
     const apiClient = new CloudflareApiClient(config, UrlFetchApp.fetch)
-    const ui = SpreadsheetApp.getUi()
 
     SpreadsheetApp.getActiveSpreadsheet().toast('転送リストをシートから読み込み中...', '同期ステップ 1/5', -1)
     let records = getForwardingData_(config)
@@ -120,8 +131,8 @@ function syncSheetToKV() {
     try {
       records = resolveAndFlattenDestinations(records, config.domainName)
     } catch (e) {
-      ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`)
-      throw e
+      ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`, ui.ButtonSet.OK)
+      return // エラーを再スローせず、ここで処理を終了する
     }
 
     SpreadsheetApp.getActiveSpreadsheet().toast('Cloudflareからメールアドレスの状態を取得中...', '同期ステップ 3/5', -1)
@@ -164,8 +175,8 @@ function dryRunSync() {
     try {
       records = resolveAndFlattenDestinations(records, config.domainName)
     } catch (e) {
-      ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`)
-      throw e
+      ui.alert('設定エラー', `転送ルールの設定に問題があります。\n\n${e.message}`, ui.ButtonSet.OK)
+      return // エラーを再スローせず、ここで処理を終了する
     }
 
     SpreadsheetApp.getActiveSpreadsheet().toast('Dry Run: 変更点を計算中...', 'Dry Run', -1)
@@ -333,7 +344,7 @@ function getCloudflareConfig_() {
 
   // Get the API Token from Script Properties for better security
   const scriptProperties = PropertiesService.getScriptProperties()
-  config.apiToken = scriptProperties.getProperty('CF_API_TOKEN')
+  config.apiToken = scriptProperties.getProperty('CLOUDFLARE_API_TOKEN')
 
   return config
 }
@@ -343,10 +354,23 @@ function getCloudflareConfig_() {
  * @private
  */
 function validateConfig_(config) {
-  if (!config.accountId || !config.namespaceId || !config.apiToken || !config.domainName) {
-    throw new Error(
-      'Required info (Account ID, Namespace ID, Domain Name, API Token) is missing. Please fill in the settings sheet and set the API Token in the Script Properties.'
-    )
+  const missingItems = []
+  if (!config.accountId) {
+    missingItems.push('CF_ACCOUNT_ID (settingsシート)')
+  }
+  if (!config.namespaceId) {
+    missingItems.push('CF_NAMESPACE_ID (settingsシート)')
+  }
+  if (!config.domainName) {
+    missingItems.push('DOMAIN_NAME (settingsシート)')
+  }
+  if (!config.apiToken) {
+    missingItems.push('CLOUDFLARE_API_TOKEN (スクリプトプロパティ)')
+  }
+
+  if (missingItems.length > 0) {
+    const errorMessage = `以下の設定が不足しています:\n\n- ${missingItems.join('\n- ')}\n\n設定を再度ご確認ください。`
+    throw new Error(errorMessage)
   }
 }
 
@@ -374,7 +398,11 @@ function getForwardingData_(config) {
       const errorCol = parseInt(colMatch[1], 10)
       sheet.setActiveRange(sheet.getRange(errorRow, errorCol))
     }
-    SpreadsheetApp.getUi().alert(`データ形式エラー`, `シートのデータに問題があります。\n\n${e.message}`)
+    SpreadsheetApp.getUi().alert(
+      `データ形式エラー`,
+      `シートのデータに問題があります。\n\n${e.message}`,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    )
     throw e // Re-throw to stop the sync process
   }
 }
