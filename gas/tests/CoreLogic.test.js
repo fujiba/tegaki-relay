@@ -47,6 +47,17 @@ describe('processForwardingData', () => {
     const expected = [{ key: 'has_forward@example.com', value: JSON.stringify(['user1@example.com']) }]
     expect(processForwardingData(values, mockConfig)).toEqual(expected)
   })
+
+  it('#で始まるコメント行を無視する', () => {
+    const values = [
+      ['Group Address', 'Forwarding Address 1'],
+      ['# This is a comment', 'comment@example.com'],
+      ['sales', 'user1@example.com'],
+      ['# another comment', 'another@example.com']
+    ]
+    const expected = [{ key: 'sales@example.com', value: JSON.stringify(['user1@example.com']) }]
+    expect(processForwardingData(values, mockConfig)).toEqual(expected)
+  })
 })
 
 describe('determineKeysToDelete', () => {

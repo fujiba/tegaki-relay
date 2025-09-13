@@ -15,6 +15,9 @@ function processForwardingData(values, config) {
 
   for (let rowIdx = 1; rowIdx < values.length; rowIdx++) {
     const row = values[rowIdx]
+    if (row[0] && row[0].startsWith('#')) {
+      continue
+    }
     for (let colIdx = 1; colIdx < row.length; colIdx++) {
       const email = row[colIdx]
       if (email && !emailRegex.test(email)) {
@@ -29,6 +32,9 @@ function processForwardingData(values, config) {
     .slice(1) // Skip header row
     .map((row) => {
       let key = row[0]
+      if (!key || key.startsWith('#')) {
+        return null
+      }
       if (key && !key.includes('@')) {
         key = `${key}@${config.domainName}`
       }

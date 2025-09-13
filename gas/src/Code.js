@@ -84,9 +84,13 @@ function initializeSheet() {
         ]
       ])
       .setFontWeight('bold') // setValuesに続けてスタイルを設定
+    finalDataSheet
+      .getRange('A2')
+      .setValue(
+        '# 例: sales, info, support など（@以降は不要）、"#"で始まるものはコメントとして扱い、同期対象から外れます。'
+      )
+      .setFontColor('gray')
 
-    // Freeze header rows
-    finalSettingsSheet.setFrozenRows(1)
     finalDataSheet.setFrozenRows(1)
 
     ss.toast('Initialization successful!', 'Setup Complete', 5)
