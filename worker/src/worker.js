@@ -7,6 +7,23 @@
  * If the recipient is not found or the forwarding list is invalid,
  * the email is rejected.
  */
+
+/**
+ * Parses and validates the forwarding list from KV.
+ * @param {string | null} forwardingListJson The JSON string from KV.
+ * @returns {{addresses?: string[], error?: string}} An object with either the addresses or an error message.
+ */
+function getForwardingAddresses(forwardingListJson) {
+  try {
+    const addresses = JSON.parse(forwardingListJson)
+    if (Array.isArray(addresses) && addresses.length > 0) {
+      return { addresses }
+    }
+    return { error: 'Address does not exist.' }
+  } catch (e) {
+    return { error: 'Configuration error: Invalid forwarding list format.' }
+  }
+}
 export default {
   /**
    * Handles incoming emails.
@@ -28,7 +45,7 @@ export default {
     const recipient = message.to
 
     // The KV key is the recipient address itself
-    const forwardingListJson = await env.FORWARDING_LIST_KV.get(recipient)
+    const forwardingListJson = await env.FORWARDING_LIST_KV.get(recipient, 'text')
 
     if (!forwardingListJson) {
       // If the key does not exist in KV, reject the email
@@ -37,20 +54,19 @@ export default {
       return
     }
 
-    try {
-      const forwardingAddresses = JSON.parse(forwardingListJson)
+    const { addresses, error } = getForwardingAddresses(forwardingListJson)
 
-      if (Array.isArray(forwardingAddresses) && forwardingAddresses.length > 0) {
-        console.log(`Forwarding ${recipient} to: ${forwardingAddresses.join(', ')}`)
-        await Promise.all(forwardingAddresses.map((address) => message.forward(address)))
-      } else {
-        // If data exists in KV but it's an empty array, etc.
-        console.log(`No valid forwarding addresses found for ${recipient}. Bouncing.`)
-        message.setReject('Address does not exist.')
-      }
-    } catch (e) {
-      console.error(`Error processing forwarding for ${recipient}:`, e)
-      message.setReject('Configuration error.')
+    if (error) {
+      console.error(`Error processing forwarding for ${recipient}: ${error}`)
+      message.setReject(error)
+      return
     }
+
+    console.log(`Forwarding ${recipient} to: ${addresses.join(', ')}`)
+    await Promise.all(addresses.map((address) => message.forward(address))).catch((err) => {
+      const errorMessage = `Failed to forward to one or more addresses for ${recipient}: ${err.message}`
+      console.error(errorMessage)
+      message.setReject(errorMessage)
+    })
   }
 }
